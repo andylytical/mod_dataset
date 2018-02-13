@@ -25,9 +25,9 @@ Given a directory, perform any of the following, user configurable tasks:
 ## Notes
 1. In GPFS, an immutable directory prevents additions, changes, deletions to all
    file contents inside that directory. This means that:
-  1. Only directories need to be set immutable (ie: files should not have the immutable
-     flag set.
-  1. All directories in the subtree need to also be set immutable.
+   1. Only directories need to be set immutable (ie: files should not have the immutable
+      flag set.
+   1. All directories in the subtree need to also be set immutable.
 1. To help verify consistency across all datasets, the "status" mode of the tool
 checks for files that have the immutable flag set and reports this as an error.
 
