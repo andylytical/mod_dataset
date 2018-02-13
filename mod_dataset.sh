@@ -1,6 +1,5 @@
 #!/bin/bash
 
-#TOPDIR=/datasets
 TOPDIR=/gpfs/fs0/datasets
 TGTOWNER=hchiang2
 TGTGROUP=lsst_users
@@ -179,18 +178,45 @@ function process_cmdline() {
 }
 
 
+function usage() {
+    local prg=$(basename $0)
+    cat <<ENDHERE
+
+Usage: $prg [options] <path/to/directory>
+
+Options:
+    -h   Print this help message
+    -d   Run in debug mode (lots of output)
+
+Controlling operation:
+    -l   Lock    Add "immutable" flag on the specified directory and all sub-directories
+    -u   UnLock  Remove "immutable" flag from the specified directory and all sub-directories
+    -s   Status  Report mutability status of the specified directory
+                 Also checks permissions and ownership
+
+Note: It is valid to provide '-s' in conjuction with one of the other operations,
+      which will automatically run a "status report" after the initial operation
+      is complete.
+
+ENDHERE
+}
+
+
 # Process options
-operation=
-while getopts ":lusd" opt; do
+operations=()
+while getopts ":hlusd" opt; do
     case $opt in
+        h)
+            usage; exit 0
+            ;;
         l)
-            operation=LOCK
+            operations+=( LOCK )
             ;;
         u)
-            operation=UNLOCK
+            operations+=( UNLOCK )
             ;;
         s)
-            operation=STATUS
+            operations+=( STATUS )
             ;;
         d)
             DEBUG=1
@@ -208,22 +234,22 @@ shift $((OPTIND-1))
 assert_root
 assert_dependencies
 process_cmdline $*
-case $operation in
-    LOCK)
-        set_perms
-        set_immutable yes
-        echo; echo
-        ;;
-    UNLOCK)
-        set_immutable no
-        echo; echo
-        ;;
-    STATUS)
-        true
-        ;;
-    *)
-        echo "No action specified. Setting default action to 'STATUS'. Continue?"
-        continue_or_exit
-        ;;
-esac
-status_report
+for op in "${operations[@]}"; do
+    case $op in
+        LOCK)
+            set_perms
+            set_immutable yes
+            ;;
+        UNLOCK)
+            set_immutable no
+            ;;
+        STATUS)
+            status_report
+            ;;
+        *)
+            echo "No action specified. Setting default action to 'STATUS'. Continue?"
+            continue_or_exit
+            ;;
+    esac
+    echo; echo
+done
