@@ -3,8 +3,14 @@
 TOPDIR=/gpfs/fs0/datasets
 TGTOWNER=hchiang2
 TGTGROUP=lsst_users
-TGTMODE_FILE=0644
-TGTMODE_DIR=0755
+#perms and types are octal (see "man -S2 stat")
+TGTPERMS_FILE=0644
+TGTPERMS_DIR=0755
+VALID_FILETYPES=( 0120000 0100000 )
+VALID_DIRTYPES=( 0040000 )
+
+DIRLIST=$(mktemp)
+FILELIST=$(mktemp)
 MMCHATTR='/usr/lpp/mmfs/bin/mmchattr -l'
 MMLSATTR='/usr/lpp/mmfs/bin/mmlsattr -l'
 PARALLEL=$( which parallel )
@@ -12,13 +18,34 @@ DEBUG=0
 TGTPATH=
 
 
-function croak {
+cleanup() {
+    rm -f $DIRLIST $FILELIST
+}
+
+
+cleanexit() {
+    cleanup
+    exit 0
+}
+
+
+croak() {
     echo "ERROR (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
+    cleanup
     exit 99
 }
 
 
-function log() {
+warn() {
+    if [[ $DEBUG -eq 1 ]] ; then
+        echo "WARN (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
+    else
+        echo "WARN $*"
+    fi
+}
+
+
+log() {
     if [[ $DEBUG -eq 1 ]] ; then
         echo "INFO (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
     else
@@ -27,32 +54,32 @@ function log() {
 }
 
 
-function debug() {
+debug() {
     [[ $DEBUG -ne 1 ]] && return
     echo "DEBUG (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
 }
 
 
-function continue_or_exit() {
+continue_or_exit() {
     local msg="Continue?"
     [[ -n "$1" ]] && msg="$1"
     echo "$msg"
     select yn in "Yes" "No"; do
         case $yn in
             Yes) return 0;;
-            No ) exit 1;;
+            No ) cleanexit;;
         esac
     done
 }
 
 
-function assert_root() {
+assert_root() {
     debug "enter..."
     [[ $EUID -eq 0 ]] || croak 'Must be root'
 }
 
 
-function assert_dependencies() {
+assert_dependencies() {
     [[ -s "$PARALLEL" ]] || croak "Missing dependency: 'parallel'"
     [[ -x "$PARALLEL" ]] || croak "Not executable: '$PARALLEL'"
     $PARALLEL --version | head -1 | grep -q 'GNU parallel' \
@@ -60,111 +87,161 @@ function assert_dependencies() {
 }
 
 
-function set_perms() {
+scan_filesystem() {
+    # Save a list of files and another of dirs
     debug "enter..."
-    local action=time
-    [[ $DEBUG -eq 1 ]] && { 
-        set -x
-        action=echo
-    }
-    log "Setting directory permissions..."
-    $action find "$TGTPATH" -type d -exec chmod $TGTMODE_DIR {} \;
-    log "Setting file permissions..."
-    $action find "$TGTPATH" -type f -exec chmod $TGTMODE_FILE {} \;
-    log "Setting group ownership..."
-    $action find "$TGTPATH" -exec chgrp "$TGTGROUP" {} \;
-    log "Setting owner..."
-    $action find "$TGTPATH" -exec chown "$TGTOWNER" {} \;
-    log "OK"
+    [[ $DEBUG -eq 1 ]] && set -x
+    find "$TGTPATH" -type d -print0 \
+    | tee $DIRLIST \
+    | $PARALLEL -0 'find {} -mindepth 1 -maxdepth 1 ! -type d' >$FILELIST
 }
 
 
-function count_mode_mismatches() {
-    # Count number of objects NOT matching expected mode
+_find_type_mode_mismatches() {
+    # find files not matching mode (type or perms) or user
+    # All paramters passed by reference
+    debug "enter..."
+    [[ $DEBUG -eq 1 ]] && set -x
+    [[ $# -ne 1 ]] && croak "Expected 3 arguments, got '$#'"
+    local -a types=("${!1}")
+    local perms="${!2}"
+    local infile="${!3}"
+
+    local -a valid_patterns
+    for typ in "${types[@]}"; do
+        #create mode in hex (as returned by stat)
+        mode=$( printf '%x' $(( 0"$typ" + 0"$perms" )) )
+        valid_patterns+=( '-e' "$mode $TGTOWNER $TGTGROUP" )
+    done
+
+    # check items in filelist
+    <$infile $PARALLEL -0 "stat -c '%f %U %G %n' {}" \
+    | grep -v -F "${valid_patterns[@]}" 
+}
+
+
+_find_lock_mismatches() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     [[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
-    local ftype
-    case $1 in
-        files)
-            ftype=f
-            tgtmode=$TGTMODE_FILE
-            ;;
-        dirs)
-            ftype=d
-            tgtmode=$TGTMODE_DIR
-            ;;
-        *) croak "Invalid file type: '$1'"
-    esac
-    find "$TGTPATH" -type $ftype ! -perm -$tgtmode -printf '\n' \
+}
+
+
+count_file_mismatches() {
+    _find_type_mode_mismatches VALID_FILETYPES[@] TGTPERMS_FILE FILELIST \
     | wc -l
 }
 
 
-function count_ownership_mismatches() {
-    # Count number of objects NOT matching expected ownership
-    debug "enter..."
-    [[ $DEBUG -eq 1 ]] && set -x
-    find "$TGTPATH" ! -user $TGTOWNER -printf '\n' -or ! -group $TGTGROUP -printf '\n' \
+count_dir_mismatches() {
+    _find_type_mode_mismatches VALID_DIRTYPES[@] TGTPERMS_DIR DIRLIST \
     | wc -l
 }
 
 
-function count_is_locked() {
+
+
+
+
+
+
+#set_perms() {
+#    debug "enter..."
+#    local action=time
+#    [[ $DEBUG -eq 1 ]] && { 
+#        set -x
+#        action=echo
+#    }
+#    log "Setting directory permissions..."
+#    $action find "$TGTPATH" -type d -exec chmod $TGTPERMS_DIR {} \;
+#    log "Setting file permissions..."
+#    $action find "$TGTPATH" -type f -exec chmod $TGTPERMS_FILE {} \;
+#    log "Setting group ownership..."
+#    $action find "$TGTPATH" -exec chgrp "$TGTGROUP" {} \;
+#    log "Setting owner..."
+#    $action find "$TGTPATH" -exec chown "$TGTOWNER" {} \;
+#    log "OK"
+#}
+
+
+#count_mode_mismatches() {
+#    # Count number of objects NOT matching expected mode
+#    debug "enter..."
+#    [[ $DEBUG -eq 1 ]] && set -x
+#    [[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
+#    local ftype
+#    case $1 in
+#        files)
+#            ftype=f
+#            tgtmode=$TGTPERMS_FILE
+#            ;;
+#        dirs)
+#            ftype=d
+#            tgtmode=$TGTPERMS_DIR
+#            ;;
+#        *) croak "Invalid file type: '$1'"
+#    esac
+#    find "$TGTPATH" -type $ftype ! -perm -$tgtmode -printf '\n' \
+#    | wc -l
+#}
+
+
+#count_ownership_mismatches() {
+#    # Count number of objects NOT matching expected ownership
+#    debug "enter..."
+#    [[ $DEBUG -eq 1 ]] && set -x
+#    find "$TGTPATH" ! -user $TGTOWNER -printf '\n' -or ! -group $TGTGROUP -printf '\n' \
+#    | wc -l
+#}
+
+
+count_is_locked() {
     # Report number of objects matching requested parameters
     # Params: 1 = yes | no
-    #         2 = dirs | files
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
-    [[ $# -ne 2 ]] && croak "Expected 2 arguments, got '$#'"
-    local ftype yesno
-    case $1 in
-        yes|no) yesno=$1;;
+    [[ $# -ne 1 ]] && croak "Expected 1 arguments, got '$#'"
+    local yesno
+    case "$1" in
+        yes|no) yesno="$1";;
         *) croak "Invalid input; must be 'yes' or 'no'"
     esac
-    case $2 in
-        files) ftype=f;;
-        dirs)  ftype=d;;
-        *) croak "Invalid file type: '$1'"
-    esac
-    find "$TGTPATH" -type $ftype -print \
-    | parallel "$MMLSATTR -d -L {} | grep immutable" \
+    $PARALLEL -0 -a $DIRLIST -a $FILELIST \
+        "$MMLSATTR -d -L {} | grep immutable" \
     | grep $yesno \
     | wc -l
 }
 
 
-function set_immutable() {
-    debug "enter..."
-    log "Adjust immutable flag, target immutable state: $1"
-    local delta
-    local action=time
-    [[ $DEBUG -eq 1 ]] && { 
-        set -x
-        action=echo
-    }
-    case $1 in
-        yes|no) delta=$1 ;;
-             *) croak "Invalid value, '$delta', for delta" ;;
-    esac
-    $action find "$TGTPATH" -type d -exec $MMCHATTR -i $1 {} \;
-    log "OK"
-}
+#set_immutable() {
+#    debug "enter..."
+#    log "Adjust immutable flag, target immutable state: $1"
+#    local delta
+#    local action=time
+#    [[ $DEBUG -eq 1 ]] && { 
+#        set -x
+#        action=echo
+#    }
+#    case $1 in
+#        yes|no) delta=$1 ;;
+#             *) croak "Invalid value, '$delta', for delta" ;;
+#    esac
+#    $action find "$TGTPATH" -type d -exec $MMCHATTR -i $1 {} \;
+#    log "OK"
+#}
 
 
-function status_report() {
+status_report() {
     debug "enter..."
     echo "Status report for '$TGTPATH'"
     echo "Note: A directory tree is properly marked immutable when all values below are 0"
-    echo "File mode mismatches: $( count_mode_mismatches files )"
-    echo "Dir mode mismatches:  $( count_mode_mismatches 'dirs' )"
-    echo "Ownership mismatches: $( count_ownership_mismatches )"
-    echo "Immutable files:      $( count_is_locked yes files )"
-    echo "Mutable dirs:         $( count_is_locked no 'dirs' )"
+    echo "File mismatches: $( count_file_mismatches )"
+    echo "Dir mismatches:  $( count_dir_mismatches )"
+    echo "Mutable Inodes:  $( count_is_locked no )"
 }
 
 
-function process_cmdline() {
+process_cmdline() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     [[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
@@ -178,7 +255,7 @@ function process_cmdline() {
 }
 
 
-function usage() {
+usage() {
     local prg=$(basename $0)
     cat <<ENDHERE
 
@@ -207,7 +284,7 @@ operations=()
 while getopts ":hlusd" opt; do
     case $opt in
         h)
-            usage; exit 0
+            usage; cleanexit
             ;;
         l)
             operations+=( LOCK )
@@ -247,9 +324,10 @@ for op in "${operations[@]}"; do
             status_report
             ;;
         *)
-            echo "No action specified. Setting default action to 'STATUS'. Continue?"
-            continue_or_exit
+            echo "No action specified."
             ;;
     esac
     echo; echo
 done
+
+cleanup
