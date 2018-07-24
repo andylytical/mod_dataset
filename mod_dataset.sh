@@ -1,11 +1,8 @@
 #!/bin/bash
 
-#TOPDIR=/lsst/datasets
-TOPDIR=/lsst
-#TGTOWNER=hchiang2
-#TGTGROUP=lsst_users
-TGTOWNER=aloftus
-TGTGROUP=grp_202
+TOPDIR=/lsst/datasets
+TGTOWNER=hchiang2
+TGTGROUP=lsst_users
 #perms are octal, suitable for chmod and stat (see "man -S2 stat")
 TGTPERMS_FILE=0644
 TGTPERMS_DIR=0755
@@ -335,7 +332,6 @@ for op in "${operations[@]}"; do
             ;;
         UNLOCK)
             unlock
-            set_perms
             ;;
         STATUS)
             status_report
