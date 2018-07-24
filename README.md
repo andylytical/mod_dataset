@@ -8,29 +8,38 @@ accidental additions, deletions or modifications to a specific set of data.
 Given a directory, perform any of the following, user configurable tasks:
 1. lock the directory and subtree below it
    1. Set user and group ownership
-   1. Set directory mode
-   1. Set file mode
-   1. Set all directories immutable
+   1. Set directory permissions
+   1. Set file permissions
+   1. Set all files and directories immutable
    1. Print Status
 1. unlock the directory and subtree below it
-   1. Remove immutable flag from all directories in the subtree
+   1. Remove immutable flag from all files and directories in the subtree
    1. Print Status
 1. Print Status
-   1. Report files not matching expected Mode
-   1. Report directories not matching expected Mode
-   1. Report files and directories not matching expected ownership
-   1. Report files marked immutable
-   1. Report directories missing immutable flag
+   1. Report number of files and directories:
+      1. not matching expected User, Group or Permisions
+      1. that are locked (immutable)
+      1. that are unlocked (not immutable)
 
-## Notes
-1. In GPFS, an immutable directory prevents additions, changes, deletions to all
-   file contents inside that directory. This means that:
-   1. Only directories need to be set immutable (ie: files should not have the immutable
-      flag set.
-   1. All directories in the subtree need to also be set immutable.
-1. To help verify consistency across all datasets, the "status" mode of the tool
-checks for files that have the immutable flag set and reports this as an error.
+# Usage:
+```
+Usage: mod_dataset.sh [options] <path/to/directory>
 
+Options:
+    -h   Print this help message
+    -d   Run in debug mode (lots of output)
+
+Controlling operation:
+    -l   Lock    Add "immutable" flag on the specified directory and all sub-directories
+    -u   UnLock  Remove "immutable" flag from the specified directory and all sub-directories
+    -s   Status  Report mutability status of the specified directory
+                 Also checks permissions and ownership
+
+Note: It is valid (and advantageous) to provide '-s' in conjuction with one of the
+      other operations, which will automatically run a "status report" after the
+      initial operation is complete.
+      The advantage comes from avoiding a second scan of the filesystem.
+```
 
 # Future work:
 Adjust script to be able to test on a non-gpfs filesystem (ie: be able to
