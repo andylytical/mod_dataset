@@ -35,10 +35,10 @@ Controlling operation:
     -s   Status  Report mutability status of the specified directory
                  Also checks permissions and ownership
 
-Note: It is valid (and advantageous) to provide '-s' in conjuction with one of the
-      other operations, which will automatically run a "status report" after the
-      initial operation is complete.
-      The advantage comes from avoiding a second scan of the filesystem.
+Note: Status is computed from the file '/lsst/admin/stats.lsst_datasets', which is updated by cron only
+      a few times daily.  It is INVALID to compare Status (-s) immediately
+      after a Lock (-l) or Unlock (-u) operation as the results will not be accurate.
+      Wait until '/lsst/admin/stats.lsst_datasets' has been refreshed before running a Status report again.
 ```
 
 # Future work:
