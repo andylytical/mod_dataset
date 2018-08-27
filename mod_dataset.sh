@@ -1,99 +1,64 @@
 #!/bin/bash
 
 TOPDIR=/lsst/datasets
-TGTOWNER=hchiang2
-TGTGROUP=lsst_users
-#perms are octal, suitable for chmod and stat (see "man -S2 stat")
-TGTPERMS_FILE=0644
-TGTPERMS_DIR=0755
-
+STATFN=/lsst/admin/stats.lsst_datasets
+OWNER=34076
+GROUP=1363
+FILE_PERMS_STRING='-r--r--r--'
+FILE_PERMS_NUMERIC='0444'
+DIR_PERMS_STRING='-r-xr-xr-x'
+DIR_PERMS_NUMERIC='0555'
 MMCHATTR='/usr/lpp/mmfs/bin/mmchattr -l'
 MMLSATTR='/usr/lpp/mmfs/bin/mmlsattr -l'
 PARALLEL=$( which parallel )
+PYTHON=$( which python3 )
 TGTPATH=
-
-declare -A TMPFILES=
 declare -A TIME
 
-tmpfn() {
-    # Get or create tempfile matching keyword
-    [[ $# -eq 1 ]] || croak "Expected 1 paramter, got $#"
-    [[ ${TMPFILES[$1]+_} ]] || TMPFILES[$1]=$(mktemp tmp."$1".XXXXXXXX)
-    echo ${TMPFILES[$1]}
+#TMPDIR=/tmp/$$
+TMPDIR='tmp'
+mkdir -p "$TMPDIR"
+# These are the files output from parse_gpfs_stats
+fnDIRS="$TMPDIR/dirs"
+fnFILES="$TMPDIR/files"
+fnDIRPERMS="$TMPDIR/dirperms"
+fnFILEPERMS="$TMPDIR/fileperms"
+fnLOCKED="$TMPDIR/locked"
+fnUNLOCKED="$TMPDIR/unlocked"
+fnSYMLINKS="$TMPDIR/symlinks"
+fnOWNERSHIP="$TMPDIR/ownership"
+
+# attempt to load common files
+PGMSRC=$( readlink -e "${BASH_SOURCE[0]}" )
+PGMDIR=$( dirname "$PGMSRC" )
+FUNCS="$PGMDIR/bash_funcs.sh"
+[[ -f "$FUNCS" ]] || {
+    echo "File not found: '$FUNCS'" 1>&2
+    exit 1
 }
+source "$FUNCS"
+PARSE_GPFS_STATS="$PGMDIR/parse_gpfs_stats.py"
+
 
 cleanup() {
+    [[ $DEBUG -eq 1 ]] && set -x
+    local action='delete'
     if [[ $DEBUG -eq 1 ]] ; then
-        set +x
         echo "TMPFILES:"
-        for k in "${!TMPFILES[@]}"; do echo "$k ... ${TMPFILES[$k]}"; done
-    else
-        rm -f "${TMPFILES[@]}"
+        action='print'
     fi
+    find "$TMPDIR" -$action
 }
-
-
-cleanexit() {
-    cleanup
-    exit 0
-}
-
-
-croak() {
-    echo "ERROR (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
-    cleanup
-    exit 99
-}
-
-
-warn() {
-    if [[ $DEBUG -eq 1 ]] ; then
-        echo "WARN (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
-    else
-        echo "WARN $*"
-    fi
-}
-
-
-log() {
-    if [[ $DEBUG -eq 1 ]] ; then
-        echo "INFO (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
-    elif [[ $VERBOSE -eq 1 ]] ; then
-        echo "INFO $*"
-    fi
-}
-
-
-debug() {
-    [[ $DEBUG -ne 1 ]] && return
-    echo "DEBUG (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*"
-}
-
-
-continue_or_exit() {
-    local msg="Continue?"
-    [[ -n "$1" ]] && msg="$1"
-    echo "$msg"
-    select yn in "Yes" "No"; do
-        case $yn in
-            Yes) return 0;;
-            No ) cleanexit;;
-        esac
-    done
-}
-
-
-assert_root() {
-    debug "enter..."
-    [[ $EUID -eq 0 ]] || croak 'Must be root'
-}
-
 
 assert_dependencies() {
     [[ -s "$PARALLEL" ]] || croak "Missing dependency: 'parallel'"
     [[ -x "$PARALLEL" ]] || croak "Not executable: '$PARALLEL'"
     $PARALLEL --version | head -1 | grep -q 'GNU parallel' \
     || croak "Missing dependency: 'gnu parallel'"
+    [[ -s "$PYTHON" ]] || croak "Missing dependency: 'python3'"
+    [[ -x "$PYTHON" ]] || croak "Not executable: '$PYTHON'"
+    pyver=$( $PYTHON -c 'import sys; print( sys.version_info[0] )' )
+    [[ $pyver -ge 3 ]] || croak "Found python version '$pyver'; required >=3"
 }
 
 
@@ -106,82 +71,21 @@ assert_valid_path() {
     log "Input path: '$rawpath'"
     TGTPATH=$( readlink -e $rawpath )
     log "Canonical path: '$TGTPATH'"
+    [[ -n $TGTPATH ]] || croak "Unable to find canonical path"
     [[ $TGTPATH == $TOPDIR/* ]] || croak "Not part of Datasets: '$TGTPATH'"
     [[ -d $TGTPATH ]] || croak "Not a directory: '$TGTPATH'"
 }
 
 
-scan_filesystem() {
-    # Save a list of dirs, a list of files, a list of symlinks and a list of other
-    # Lists of dirs and of files will be used for immutability set/check
-    # Lists of symlinks are ignored (can't be set immutable nor changed once dir
-    # is immutable)
-    # Lists of other file types is an error if non-empty
+parse_filesystem_stats() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
-    log "Scanning filesystem at $TGTPATH ..."
-    #initialize tmp files
-    tmpfn DIRS &>/dev/null
-    tmpfn FILES &>/dev/null
-    tmpfn OTHERS &>/dev/null
     local start=$SECONDS
-    find "$TGTPATH" \
-           -type d -fprint0 $(tmpfn DIRS) \
-        -o -type f -fprint0 $(tmpfn FILES) \
-        -o -type l -fprint0 /dev/null \
-        -o         -fprint  $(tmpfn OTHERS)
+    grep -F "$TGTPATH" $STATFN \
+    | $PYTHON $PARSE_GPFS_STATS -t "$TMPDIR" 
     local end=$SECONDS
-    TIME[SCAN_FILESYSTEM]=$(bc <<< "$end - $start")
-    debug "check for errors"
-    if [[ -s $(tmpfn OTHERS) ]] ; then
-        local tmp=$(mktemp)
-        mv $(tmpfn OTHERS) $tmp
-        warn "Only regular and symbolic link filetypes are allowed."
-        croak "Invalid filetypes found: list in '$tmp'"
-    fi
-    log "Filesystem scan completed in ${TIME[SCAN_FILESYSTEM]} seconds"
-}
-
-
-count_mode_mismatches() {
-    # find files not matching mode (type + perms) + user + group
-    debug "enter..."
-    [[ $DEBUG -eq 1 ]] && set -x
-    log "Count mode mismatches..."
-    #initialize new tmp files
-    tmpfn mode_mismatches &>/dev/null
-    local filemode=$( printf '%x' $(( 0100000 + 0$TGTPERMS_FILE )) )
-    local dirmode=$( printf '%x' $(( 0040000 + 0$TGTPERMS_DIR )) )
-    local -a valid_patterns
-    for mode in "$filemode" "$dirmode"; do
-        valid_patterns+=( '-e' "$mode $TGTOWNER $TGTGROUP" )
-    done
-    # check all items in filelist
-    local start=$SECONDS
-    cat $(tmpfn FILES) $(tmpfn DIRS) \
-    | $PARALLEL -0 "stat -c '%f %U %G %n' {}" \
-    | grep -v -F "${valid_patterns[@]}" >$(tmpfn mode_mismatches)
-    local end=$SECONDS
-    TIME[COUNT_MODE_MISMATCHES]=$(bc <<< "$end - $start")
-    log "Count mode mismatches completed in ${TIME[COUNT_MODE_MISMATCHES]} seconds"
-}
-
-
-count_locked_unlocked() {
-    # Report number of objects matching requested parameters
-    debug "enter..."
-    [[ $DEBUG -eq 1 ]] && set -x
-    log "Count (un)locked files..."
-    tmpfn locked &>/dev/null
-    tmpfn unlocked &>/dev/null
-    local start=$SECONDS
-    cat $(tmpfn FILES) $(tmpfn DIRS) \
-    | $PARALLEL -0 "$MMLSATTR -d -L {} | grep immutable" \
-    | tee >(grep -F 'yes' >$(tmpfn locked)) \
-    | grep -F 'no' >$(tmpfn unlocked)
-    local end=$SECONDS
-    TIME[COUNT_LOCKED_UNLOCKED]=$(bc <<< "$end - $start")
-    log "Count (un)locked files completed in ${TIME[COUNT_LOCKED_UNLOCKED]} seconds"
+    TIME[PARSE_STATS]=$(bc <<< "$end - $start")
+    log "Parse filesystem stats completed in ${TIME[PARSE_STATS]} seconds"
 }
 
 
@@ -189,25 +93,27 @@ set_perms() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     local start=$SECONDS
-    log "Setting permissions, owner, group ..."
-    $PARALLEL -0 -a $(tmpfn DIRS) "chmod $TGTPERMS_DIR {}; chown ${TGTOWNER}:${TGTGROUP} {}"
-    $PARALLEL -0 -a $(tmpfn FILES) "chmod $TGTPERMS_FILE {}; chown ${TGTOWNER}:${TGTGROUP} {}"
+    log "Setting directory permissions ..."
+    $PARALLEL --xargs -a $fnDIRPERMS "chmod $DIR_PERMS_NUMERIC"
+    log "Done"
+    log "Setting file permissions ..."
+    $PARALLEL --xargs -a $fnFILEPERMS "chmod $FILE_PERMS_NUMERIC"
+    log "Done"
     local end=$SECONDS
     TIME[SET_PERMS]=$(bc <<< "$end - $start")
-    log "Set permissions, owner, group completed in ${TIME[SET_PERMS]} seconds"
+    log "Set permissions completed in ${TIME[SET_PERMS]} seconds"
 }
 
 
-_set_immutable() {
+set_ownership() {
     debug "enter..."
-    local delta
     [[ $DEBUG -eq 1 ]] && set -x
-    case $1 in
-        yes|no) delta=$1 ;;
-             *) croak "Invalid value, '$delta', for delta" ;;
-    esac
-    cat $(tmpfn DIRS) $(tmpfn FILES) \
-    | $PARALLEL -0 "$MMCHATTR -i $1"
+    local start=$SECONDS
+    log "Setting ownership ..."
+    $PARALLEL --xargs -a $fnOWNERSHIP "chown ${OWNER}:${GROUP}"
+    local end=$SECONDS
+    TIME[SET_PERMS]=$(bc <<< "$end - $start")
+    log "Set ownership completed in ${TIME[SET_PERMS]} seconds"
 }
 
 
@@ -216,7 +122,7 @@ lock() {
     [[ $DEBUG -eq 1 ]] && set -x
     log "Locking files..."
     local start=$SECONDS
-    _set_immutable yes
+    $PARALLEL --xargs -a $fnUNLOCKED "$MMCHATTR -i yes"
     local end=$SECONDS
     TIME[LOCK]=$(bc <<< "$end - $start")
     log "Locking files completed in ${TIME[LOCK]} seconds"
@@ -228,7 +134,7 @@ unlock() {
     [[ $DEBUG -eq 1 ]] && set -x
     log "Unlocking files..."
     local start=$SECONDS
-    _set_immutable no
+    $PARALLEL --xargs -a $fnLOCKED "$MMCHATTR -i no"
     local end=$SECONDS
     TIME[UNLOCK]=$(bc <<< "$end - $start")
     log "Unlocking files completed in ${TIME[UNLOCK]} seconds"
@@ -237,17 +143,50 @@ unlock() {
 
 status_report() {
     debug "enter..."
-    count_mode_mismatches
-    count_locked_unlocked
-    local mmcount=$( wc -l $(tmpfn mode_mismatches) | cut -d' ' -f1 )
-    local lcount=$( wc -l $(tmpfn locked) | cut -d' ' -f1 )
-    local uncount=$( wc -l $(tmpfn unlocked) | cut -d' ' -f1 )
+    local num_files=$( wc -l $fnFILES | cut -d' ' -f1 )
+    local num_dirs=$( wc -l $fnDIRS | cut -d' ' -f1 )
+    local num_symlinks=$( wc -l $fnSYMLINKS | cut -d' ' -f1 )
+    local num_locked=$( wc -l $fnLOCKED | cut -d' ' -f1 )
+    local num_unlocked=$( wc -l $fnUNLOCKED | cut -d' ' -f1 )
+    local total_files_dirs=$( bc <<< "$num_files + $num_dirs" )
+    local total_locked_unlocked=$( bc <<< "$num_locked + $num_unlocked" )
+    local num_dirperms=$( wc -l $fnDIRPERMS | cut -d' ' -f1 )
+    local num_fileperms=$( wc -l $fnFILEPERMS | cut -d' ' -f1 )
+    local num_ownership=$( wc -l $fnOWNERSHIP | cut -d' ' -f1 )
+    local stats_mtime=$( stat -c %y $STATFN )
+
+    # Status Details
     echo
     echo "Status report for '$TGTPATH'"
-    echo "Note: mode mismatches are dirs/files without expected user, group or permissions."
-    printf "% 8d Mode mismatches\n" $mmcount
-    printf "% 8d Locked inodes\n"   $lcount
-    printf "% 8d Unlocked inodes\n" $uncount
+    echo "(based on stats generated at $stats_mtime)"
+    echo
+    printf "% 8d Symlinks (excluded from totals)\n" $num_symlnks
+    printf "\n"
+    printf "% 8d Dirs\n" $num_dirs
+    printf "% 8d Files\n" $num_files
+    printf "% 8d Total (dirs + files)\n" $total_files_dirs
+    printf "\n"
+    printf "% 8d Locked\n" $num_locked
+    printf "% 8d Unlocked\n" $num_unlocked
+    printf "% 8d Total (locked + unlocked)\n" $total_locked_unlocked
+    printf "\n"
+
+    # Error checking
+    if [[ $num_unlocked -gt 0 ]] ; then
+        warn "$num_unlocked files or dirs unlocked."
+    fi
+    if [[ $num_locked -ne $total_files_dirs ]] ; then
+        warn "Mismatch between Locked ($num_locked) and Dirs+Files ($total_files_dirs)"
+    fi
+    if [[ $num_dirperms -gt 0 ]] ; then
+        warn "$num_dirperms directories with bad permissions"
+    fi
+    if [[ $num_fileperms -gt 0 ]] ; then
+        warn "$num_fileperms files with bad permissions"
+    fi
+    if [[ $num_ownership -gt 0 ]] ; then
+        warn "$num_ownership inodes with bad ownership"
+    fi
 }
 
 
@@ -281,11 +220,10 @@ Controlling operation:
     -s   Status  Report mutability status of the specified directory
                  Also checks permissions and ownership
 
-Note: It is valid (and advantageous) to provide '-s' in conjuction with one of the 
-      other operations, which will automatically run a "status report" after the 
-      initial operation is complete.
-      The advantage comes from avoiding a second scan of the filesystem.
-
+Note: Status is computed from the file '$STATFN', which is updated by cron only
+      a few times daily.  It is INVALID to compare Status (-s) immediately
+      after a Lock (-l) or Unlock (-u) operation as the results will not be accurate.
+      Wait until '$STATFN' has been refreshed before running a Status report again.
 ENDHERE
 }
 
@@ -320,10 +258,13 @@ while getopts ":hlusd" opt; do
 shift $((OPTIND-1))
 [[ ${#operations[*]} -ge 1 ]] || croak 'No operations specified'
 
+# Check for input
+[[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
+
 assert_root
 assert_dependencies
 assert_valid_path "$1"
-scan_filesystem
+parse_filesystem_stats
 for op in "${operations[@]}"; do
     case $op in
         LOCK)
