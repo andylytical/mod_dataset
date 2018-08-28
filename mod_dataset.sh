@@ -310,6 +310,8 @@ Note: Status is computed from the file '$STATFN', which is updated by cron only
       a few times daily.  It is INVALID to compare Status (-s) immediately
       after a Lock (-l) or Unlock (-u) operation as the results will not be accurate.
       Wait until '$STATFN' has been refreshed before running a Status report again.
+      Or trigger a new statfn run (-n option) and wait for the file to update 
+      (takes about 20 minutes)
 ENDHERE
 }
 
