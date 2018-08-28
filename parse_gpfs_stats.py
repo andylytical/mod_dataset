@@ -55,7 +55,7 @@ def process_cmdline():
         'uid':       '34076',
         'gid':       '1363',
         'fileperms': '-r--r--r--',
-        'dirperms':  '-r-xr-xr-x',
+        'dirperms':  'dr-xr-xr-x',
         'tmpdir':    '/tmp',
     }
     p.set_defaults( **defaults )
@@ -64,6 +64,11 @@ def process_cmdline():
 
     # Check or create tmpdir
     os.makedirs( args.tmpdir, exist_ok=True )
+
+    # Remove any leading spaces from permission strings
+    # Due to bug https://bugs.python.org/issue9334
+    # Argparse doesn't accept strings that begin with a dash
+    args.fileperms = args.fileperms.lstrip()
 
     return( args )
 

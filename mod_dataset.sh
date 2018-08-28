@@ -2,22 +2,22 @@
 
 TOPDIR=/lsst/datasets
 STATFN=/lsst/admin/stats.lsst_datasets
+STATFN_TRIGGER=/lsst/admin/stats.rerun
 OWNER=34076
 GROUP=1363
 FILE_PERMS_STRING='-r--r--r--'
 FILE_PERMS_NUMERIC='0444'
-DIR_PERMS_STRING='-r-xr-xr-x'
-DIR_PERMS_NUMERIC='0555'
+DIR_PERMS_STRING='dr-xr-sr-x'
+DIR_PERMS_NUMERIC='2555'
 MMCHATTR='/usr/lpp/mmfs/bin/mmchattr -l'
-MMLSATTR='/usr/lpp/mmfs/bin/mmlsattr -l'
 PARALLEL=$( which parallel )
 PYTHON=$( which python3 )
 TGTPATH=
 declare -A TIME
 
-#TMPDIR=/tmp/$$
-TMPDIR='tmp'
+TMPDIR='/tmp/mod_dataset_tmp'
 mkdir -p "$TMPDIR"
+fnLASTUPDATE="$TMPDIR/.last_update"
 # These are the files output from parse_gpfs_stats
 fnDIRS="$TMPDIR/dirs"
 fnFILES="$TMPDIR/files"
@@ -27,6 +27,9 @@ fnLOCKED="$TMPDIR/locked"
 fnUNLOCKED="$TMPDIR/unlocked"
 fnSYMLINKS="$TMPDIR/symlinks"
 fnOWNERSHIP="$TMPDIR/ownership"
+
+# parallel joblog basename
+fnJOBLOG="$TMPDIR/joblog"
 
 # attempt to load common files
 PGMSRC=$( readlink -e "${BASH_SOURCE[0]}" )
@@ -39,16 +42,6 @@ FUNCS="$PGMDIR/bash_funcs.sh"
 source "$FUNCS"
 PARSE_GPFS_STATS="$PGMDIR/parse_gpfs_stats.py"
 
-
-cleanup() {
-    [[ $DEBUG -eq 1 ]] && set -x
-    local action='delete'
-    if [[ $DEBUG -eq 1 ]] ; then
-        echo "TMPFILES:"
-        action='print'
-    fi
-    find "$TMPDIR" -$action
-}
 
 assert_dependencies() {
     [[ -s "$PARALLEL" ]] || croak "Missing dependency: 'parallel'"
@@ -77,15 +70,66 @@ assert_valid_path() {
 }
 
 
-parse_filesystem_stats() {
+clean_joblogs() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
+    local dn=$( dirname "$fnJOBLOG" )
+    local fnbase=$( basename "$fnJOBLOG" )
+    find $TMPDIR -mindepth 1 -name "${fnbase}*" -delete
+}
+
+
+clean_tmp() {
+    debug "enter..."
+    [[ $DEBUG -eq 1 ]] && set -x
+    find $TMPDIR -mindepth 1 -delete
+}
+
+
+parse_filesystem_stats() {
+    ### Parse latest filesystem stats from STATFN
+    #   Save data to text files
+    #   Upon success, write a "last_update" file with timestamp of last update.
+    #   Next run, if "last_update" is newer than STATFN, no need to re-run.
+    #             if "last_update" is older than STATFN, clean old files and re-run.
+    debug "enter..."
+    [[ $DEBUG -eq 1 ]] && set -x
+    log "Parsing filesystem stats ..."
+    # check for last update
+    if [[ "$fnLASTUPDATE" -nt "$STATFN" ]] ; then
+        TIME[PARSE_STATS]=0
+        log "Done (nothing to do, stats file is unchanged since last run)"
+        return
+    fi
+    touch "$fnLASTUPDATE"
     local start=$SECONDS
     grep -F "$TGTPATH" $STATFN \
-    | $PYTHON $PARSE_GPFS_STATS -t "$TMPDIR" 
+    | $PYTHON $PARSE_GPFS_STATS \
+        -u "$OWNER" \
+        -g "$GROUP" \
+        -f " $FILE_PERMS_STRING" \
+        -d "$DIR_PERMS_STRING" \
+        -t "$TMPDIR"
     local end=$SECONDS
     TIME[PARSE_STATS]=$(bc <<< "$end - $start")
     log "Parse filesystem stats completed in ${TIME[PARSE_STATS]} seconds"
+}
+
+
+check_joblog_errors() {
+    debug "enter..."
+    [[ $DEBUG -eq 1 ]] && set -x
+    [[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
+    local joblog="$1"
+    [[ -r "$joblog" ]] || croak "Cant read joblog file '$joblog'"
+    local errcount=$( tail -n +2 "$joblog" \
+        | cut -f 1-8 \
+        | awk -F '\t' '$7 !~ /0/ {printf "\n"}' \
+        | wc -l
+    )
+    if [[ $errcount -gt 0 ]] ; then
+        croak "Errors detected in joblog: '$joblog'"
+    fi
 }
 
 
@@ -93,11 +137,25 @@ set_perms() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     local start=$SECONDS
+    local joblog="${fnJOBLOG}.set_dir_perms"
+    # Dir perms
     log "Setting directory permissions ..."
-    $PARALLEL --xargs -a $fnDIRPERMS "chmod $DIR_PERMS_NUMERIC"
+    $PARALLEL \
+        --xargs \
+        --joblog "$joblog" \
+        -a $fnDIRPERMS \
+        "chmod $DIR_PERMS_NUMERIC"
+    check_joblog_errors "$joblog"
     log "Done"
+    # File perms
+    joblog="${fnJOBLOG}.set_file_perms"
     log "Setting file permissions ..."
-    $PARALLEL --xargs -a $fnFILEPERMS "chmod $FILE_PERMS_NUMERIC"
+    $PARALLEL \
+        --xargs \
+        -a $fnFILEPERMS \
+        --joblog "$joblog" \
+        "chmod $FILE_PERMS_NUMERIC"
+    check_joblog_errors "$joblog"
     log "Done"
     local end=$SECONDS
     TIME[SET_PERMS]=$(bc <<< "$end - $start")
@@ -109,11 +167,17 @@ set_ownership() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     local start=$SECONDS
+    local joblog="${fnJOBLOG}.set_ownership"
     log "Setting ownership ..."
-    $PARALLEL --xargs -a $fnOWNERSHIP "chown ${OWNER}:${GROUP}"
+    $PARALLEL \
+        --xargs \
+        --joblog "$joblog" \
+        -a $fnOWNERSHIP \
+        "chown ${OWNER}:${GROUP}"
+    check_joblog_errors "$joblog"
     local end=$SECONDS
-    TIME[SET_PERMS]=$(bc <<< "$end - $start")
-    log "Set ownership completed in ${TIME[SET_PERMS]} seconds"
+    TIME[SET_OWNERSHIP]=$(bc <<< "$end - $start")
+    log "Set ownership completed in ${TIME[SET_OWNERSHIP]} seconds"
 }
 
 
@@ -122,7 +186,13 @@ lock() {
     [[ $DEBUG -eq 1 ]] && set -x
     log "Locking files..."
     local start=$SECONDS
-    $PARALLEL --xargs -a $fnUNLOCKED "$MMCHATTR -i yes"
+    local joblog="${fnJOBLOG}.lock"
+    $PARALLEL \
+        --xargs \
+        --joblog "$joblog" \
+        -a $fnUNLOCKED \
+        "$MMCHATTR -i yes"
+    check_joblog_errors "$joblog"
     local end=$SECONDS
     TIME[LOCK]=$(bc <<< "$end - $start")
     log "Locking files completed in ${TIME[LOCK]} seconds"
@@ -134,7 +204,13 @@ unlock() {
     [[ $DEBUG -eq 1 ]] && set -x
     log "Unlocking files..."
     local start=$SECONDS
-    $PARALLEL --xargs -a $fnLOCKED "$MMCHATTR -i no"
+    local joblog="${fnJOBLOG}.unlock"
+    $PARALLEL \
+        --xargs \
+        --joblog "$joblog" \
+        -a $fnLOCKED \
+        "$MMCHATTR -i no"
+    check_joblog_errors "$joblog"
     local end=$SECONDS
     TIME[UNLOCK]=$(bc <<< "$end - $start")
     log "Unlocking files completed in ${TIME[UNLOCK]} seconds"
@@ -153,12 +229,13 @@ status_report() {
     local num_dirperms=$( wc -l $fnDIRPERMS | cut -d' ' -f1 )
     local num_fileperms=$( wc -l $fnFILEPERMS | cut -d' ' -f1 )
     local num_ownership=$( wc -l $fnOWNERSHIP | cut -d' ' -f1 )
-    local stats_mtime=$( stat -c %y $STATFN )
+    local stats_mtime=$( date -d @$(stat -c '%Y' $STATFN) +'%F %T' )
 
     # Status Details
     echo
     echo "Status report for '$TGTPATH'"
-    echo "(based on stats generated at $stats_mtime)"
+    echo "(based on statfile '$STATFN')"
+    echo "(generated at $stats_mtime)"
     echo
     printf "% 8d Symlinks (excluded from totals)\n" $num_symlnks
     printf "\n"
@@ -187,6 +264,8 @@ status_report() {
     if [[ $num_ownership -gt 0 ]] ; then
         warn "$num_ownership inodes with bad ownership"
     fi
+
+    # Check joblogs for errors
 }
 
 
@@ -213,13 +292,20 @@ Usage: $prg [options] <path/to/directory>
 Options:
     -h   Print this help message
     -d   Run in debug mode (lots of output)
+    -f   Force a new parse filesystem stats (ignore cached information)
+         Needed if running multiple status operations against different paths.
 
 Controlling operation:
-    -l   Lock    Add "immutable" flag on the specified directory and all sub-directories
-    -u   UnLock  Remove "immutable" flag from the specified directory and all sub-directories
+    -l   Lock    Add "immutable" flag on the specified directory 
+                 and all sub-directories. Also sets the proper permissions
+                 and ownership.
+    -u   UnLock  Remove "immutable" flag from the specified directory 
+                 and all sub-directories
     -s   Status  Report mutability status of the specified directory
                  Also checks permissions and ownership
-
+    -n   NewPolicyRun
+                 Trigger a new policy run to gather file stats.
+     
 Note: Status is computed from the file '$STATFN', which is updated by cron only
       a few times daily.  It is INVALID to compare Status (-s) immediately
       after a Lock (-l) or Unlock (-u) operation as the results will not be accurate.
@@ -228,22 +314,48 @@ ENDHERE
 }
 
 
+mk_new_stats() {
+    debug "enter..."
+    [[ $DEBUG -eq 1 ]] && set -x
+    [[ -f "$STATFN_TRIGGER" ]] && return 0
+    local safety=$TMPDIR/.mk_new_stats
+    local now=$( date +%s )
+    local last safe
+    if [[ -f "$safety" ]] ; then
+        last=$( stat -c '%Y' "$safety" )
+        safe=$( bc <<< "($now - $last) > 3600" )
+        [[ $safe -eq 1 ]] || croak 'Last trigger less than 1 hr old, refusing to trigger new stats run'
+    fi
+    if [[ -f "$STATFN" ]] ; then
+        last=$( stat -c '%Y' "$STATFN" )
+        safe=$( bc <<< "($now - $last) > 3600" )
+        [[ $safe -eq 1 ]] || croak 'Stats file is less than 1 hr old, refusing to trigger new stats run'
+    fi
+    touch "$STATFN_TRIGGER"
+    touch "$safety"
+}
+
+
 # Process options
-operations=()
+operation=''
 DEBUG=0
 VERBOSE=1
-while getopts ":hlusd" opt; do
+while getopts ":dfhlnsuv" opt; do
     case $opt in
         d)  DEBUG=1
+            ;;
+        f)  clean_tmp
             ;;
         h)  usage
             cleanexit
             ;;
-        l)  operations+=( LOCK )
+        l)  operation='LOCK'
             ;;
-        s)  operations+=( STATUS )
+        n)  operation='NEWSTATS'
             ;;
-        u)  operations+=( UNLOCK )
+        s)  operation='STATUS'
+            ;;
+        u)  operation='UNLOCK'
             ;;
         v)  VERBOSE=1
             ;;
@@ -256,31 +368,39 @@ while getopts ":hlusd" opt; do
         esac
     done
 shift $((OPTIND-1))
-[[ ${#operations[*]} -ge 1 ]] || croak 'No operations specified'
-
-# Check for input
-[[ $# -ne 1 ]] && croak "Expected 1 argument, got '$#'"
+[[ ${#operation} -ge 1 ]] || croak 'No operation specified'
 
 assert_root
-assert_dependencies
-assert_valid_path "$1"
-parse_filesystem_stats
-for op in "${operations[@]}"; do
-    case $op in
-        LOCK)
-            set_perms
-            lock
-            ;;
-        UNLOCK)
-            unlock
-            ;;
-        STATUS)
-            status_report
-            ;;
-        *)
-            echo "Unknown action specified."
-            ;;
-    esac
-done
-echo; time_report
-cleanup
+case "$operation" in
+    LOCK)
+        assert_dependencies
+        assert_valid_path "$1"
+        parse_filesystem_stats
+        clean_joblogs
+        set_perms
+        set_ownership
+        lock
+        time_report
+        ;;
+    UNLOCK)
+        assert_dependencies
+        assert_valid_path "$1"
+        parse_filesystem_stats
+        clean_joblogs
+        unlock
+        time_report
+        ;;
+    STATUS)
+        assert_dependencies
+        assert_valid_path "$1"
+        parse_filesystem_stats
+        status_report
+        time_report
+        ;;
+    NEWSTATS)
+        mk_new_stats
+        ;;
+    *)
+        echo "Unknown action specified."
+        ;;
+esac

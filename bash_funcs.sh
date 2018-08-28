@@ -2,14 +2,12 @@
 
 
 cleanexit() {
-    cleanup
     exit 0
 }
 
 
 croak() {
     echo "ERROR (${BASH_SOURCE[1]} [${BASH_LINENO[0]}] ${FUNCNAME[1]}) $*" 1>&2
-    cleanup
     exit 99
 }
 
