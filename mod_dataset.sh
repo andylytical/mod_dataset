@@ -287,13 +287,13 @@ usage() {
     local prg=$(basename $0)
     cat <<ENDHERE
 
-Usage: $prg [options] <path/to/directory>
+Usage: $prg [options] PATH
 
 Options:
     -h   Print this help message
     -d   Run in debug mode (lots of output)
-    -f   Force a new parse filesystem stats (ignore cached information)
-         Needed if running multiple status operations against different paths.
+    -f   Don't use cached data (from a previous Status operation).
+         Needed if running again for a different PATH.
 
 Controlling operation:
     -l   Lock    Add "immutable" flag on the specified directory 
@@ -317,13 +317,21 @@ Note:
       background, Compare timestamp on the stats file to know if/when the
       background job has completed (takes about 20 minutes).
 
-Note: It is valid to run multiple Status operations without updating the stats
-      file, since Status is a read-only operation and thus the stats file will
-      remain up-to-date. When the first Status operation is run, the stats file
-      will be parsed based on the PATH given. This takes about 60 seconds.
-      The output from the Status run will be cached so that future runs will be
-      faster. However, if a future run is for a different PATH, use the -f
+Note: When a Status operaion is run, the stats file is parsed (for the specified
+      PATH) and file information is cached. This allows a Lock or Unlock operation
+      to re-use the cached data and skip the stat scan.
+      However, if a future run is needed for a different PATH, use the -f
       option to ignore the cache and re-parse the stats file.
+
+Sample Sequence:
+  1. mod_dataset.sh -s PATH
+  2. mod_dataset.sh -l PATH
+  3. mod_dataset.sh -n
+  4. stat -c '%y' /lsst/admin/stats.lsst_datasets
+  5. watch -n 60 "stat -c '%y' /lsst/admin/stats.lsst_datasets"
+     (wait for timestamp update on stats file)
+  6. mod_dataset.sh -s PATH
+     (If no warnings, then all is good)
 
 ENDHERE
 }
