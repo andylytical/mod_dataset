@@ -6,11 +6,11 @@ accidental additions, deletions or modifications to a specific set of data.
 
 # Goals:
 Given a directory, perform any of the following, user configurable tasks:
-1. lock the directory and subtree below it
+1. Lock the directory and subtree below it
    1. Set user and group ownership
    1. Set directory and file permissions
    1. Set all files and directories immutable
-1. unlock the directory and subtree below it
+1. Unlock the directory and subtree below it
    1. Remove immutable flag from all files and directories in the subtree
 1. Print Status
    1. Report number of files and directories:
