@@ -306,12 +306,25 @@ Controlling operation:
     -n   NewPolicyRun
                  Trigger a new policy run to gather file stats.
      
-Note: Status is computed from the file '$STATFN', which is updated by cron only
-      a few times daily.  It is INVALID to compare Status (-s) immediately
-      after a Lock (-l) or Unlock (-u) operation as the results will not be accurate.
-      Wait until '$STATFN' has been refreshed before running a Status report again.
-      Or trigger a new statfn run (-n option) and wait for the file to update 
-      (takes about 20 minutes)
+Note:
+      Status is computed from the file '/lsst/admin/stats.lsst_datasets',
+      which is updated by cron a few times daily.  It is valid to run a
+      status, lock, or unlock operation without any preparatory action (because
+      the stats file will be accurate the first time).
+      However, it is INVALID to compare Status (-s) immediately
+      after a Lock (-l) or Unlock (-u) operation without first triggering an
+      update to the stats file.  The stats file update will happen in the
+      background, Compare timestamp on the stats file to know if/when the
+      background job has completed (takes about 20 minutes).
+
+Note: It is valid to run multiple Status operations without updating the stats
+      file, since Status is a read-only operation and thus the stats file will
+      remain up-to-date. When the first Status operation is run, the stats file
+      will be parsed based on the PATH given. This takes about 60 seconds.
+      The output from the Status run will be cached so that future runs will be
+      faster. However, if a future run is for a different PATH, use the -f
+      option to ignore the cache and re-parse the stats file.
+
 ENDHERE
 }
 
