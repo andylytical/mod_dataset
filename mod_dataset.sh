@@ -301,7 +301,6 @@ Options:
     -h   Print this help message
     -d   Run in debug mode (lots of output)
     -f   Don't use cached data (from a previous Status operation).
-         Needed if running again for a different PATH.
 
 Controlling operation:
     -l   Lock    Add "immutable" flag on the specified directory 
@@ -322,14 +321,8 @@ Note:
       However, it is INVALID to compare Status (-s) immediately
       after a Lock (-l) or Unlock (-u) operation without first triggering an
       update to the stats file.  The stats file update will happen in the
-      background, Compare timestamp on the stats file to know if/when the
+      background. Compare timestamp on the stats file to know if/when the
       background job has completed (takes about 20 minutes).
-
-Note: When a Status operaion is run, the stats file is parsed (for the specified
-      PATH) and file information is cached. This allows a Lock or Unlock operation
-      to re-use the cached data and skip the stat scan.
-      However, if a future run is needed for a different PATH, use the -f
-      option to ignore the cache and re-parse the stats file.
 
 Sample Sequence:
   1. mod_dataset.sh -s PATH
