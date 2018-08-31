@@ -95,13 +95,21 @@ parse_filesystem_stats() {
     debug "enter..."
     [[ $DEBUG -eq 1 ]] && set -x
     log "Parsing filesystem stats ..."
-    # check for last update
-    if [[ "$fnLASTUPDATE" -nt "$STATFN" ]] ; then
-        TIME[PARSE_STATS]=0
-        log "Done (nothing to do, stats file is unchanged since last run)"
-        return
+    # check for last update, skip status recompute only if all of the following:
+    # 1. cached stats exist
+    # 2. tgtpath is same as old path
+    # 3. statfn hasn't been updated since last run
+    if [[ -f "$fnLASTUPDATE" ]] ; then
+        local old_path=$( head -1 "$fnLASTUPDATE" )
+        if [[ "$old_path" == "$TGTPATH" ]] ; then
+            if [[ "$fnLASTUPDATE" -nt "$STATFN" ]] ; then
+                TIME[PARSE_STATS]=0
+                log "Done (nothing to do, stats file is unchanged since last run)"
+                return
+            fi
+        fi
     fi
-    touch "$fnLASTUPDATE"
+    echo "$TGTPATH" >"$fnLASTUPDATE"
     local start=$SECONDS
     grep -F "$TGTPATH" $STATFN \
     | $PYTHON $PARSE_GPFS_STATS \
